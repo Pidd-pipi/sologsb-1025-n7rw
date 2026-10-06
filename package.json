@@ -5,7 +5,8 @@
   "scripts": {
     "start": "ng serve --host 0.0.0.0 --port 4200",
     "dev": "ng serve --host 0.0.0.0 --port 4200",
-    "build": "ng build --configuration production"
+    "build": "ng build --configuration production",
+    "verify:merge": "esbuild scripts/verify-merge.mts --bundle --platform=node --format=esm | node --input-type=module"
   },
   "dependencies": {
     "@angular/animations": "19.2.25",

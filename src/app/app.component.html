@@ -8,7 +8,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <span class="save-state"><span class="status-dot" [class.locked]="isLocked"></span>本地自动保存 {{ lastSavedAt }}</span>
+      <span class="save-state" [class.save-failed]="!!saveError"><span class="status-dot" [class.locked]="isLocked" [class.failed]="!!saveError"></span>{{ saveError ? lastSavedAt : '本地自动保存 ' + lastSavedAt }}</span>
       <button nbButton status="basic" size="small" (click)="undo()" [disabled]="!history.length">撤销 ⌘Z</button>
       <button nbButton status="basic" size="small" (click)="redo()" [disabled]="!future.length">重做 ⌘Y</button>
       <button nbButton status="success" size="small" (click)="saveNow()">保存草稿</button>
@@ -22,6 +22,7 @@
         <h2>{{ draft.title || '未命名通知' }}</h2>
       </div>
       <div class="strip-metrics">
+        <div><strong class="warning-text">{{ pendingConflicts.length }}</strong><span>待裁定</span></div>
         <div><strong>{{ draft.languages.length }}</strong><span>语言版本</span></div>
         <div><strong>{{ draft.channels.length }}</strong><span>发布渠道</span></div>
         <div><strong class="danger-text">{{ blockingChecks.length }}</strong><span>阻断问题</span></div>
@@ -42,7 +43,17 @@
       <button [class.active]="activeView === 'versions'" (click)="activeView = 'versions'">
         <span>04</span><strong>锁定与比较</strong><small>冻结、紧急修订、差异</small>
       </button>
+      <button [class.active]="activeView === 'sync'" (click)="activeView = 'sync'">
+        <span>05</span><strong>断网合并</strong><small>整包续作 · 并列待裁定</small>
+        <b class="nav-badge" *ngIf="hasPendingConflicts">{{ pendingConflicts.length }}</b>
+      </button>
     </nav>
+
+    <div *ngIf="saveError" class="save-error-banner">
+      <div class="emergency-sign">写回</div>
+      <div><strong>{{ saveError }}</strong><p>本地存储中的草稿维持在写入前版本，未被半成品覆盖。</p></div>
+      <button nbButton status="danger" size="small" (click)="retryPersist()">重试写入</button>
+    </div>
 
     <div *ngIf="draft.emergencyRevision" class="emergency-banner">
       <div class="emergency-sign">修订</div>
@@ -97,18 +108,22 @@
           </nb-card-header>
           <div class="language-tabs">
             <button *ngFor="let language of draft.languages" [class.active]="language.id === selectedLanguageId" (click)="selectedLanguageId = language.id; selectedSentenceIndex = 0">
-              <strong>{{ language.name }}</strong><small>{{ language.reviewed ? '已复核' : '待复核' }}</small>
+              <strong>{{ language.name }} <i class="conflict-dot" *ngIf="conflictFor(language.id)">待裁定</i></strong><small>{{ language.reviewed ? '已复核' : '待复核' }} · r{{ language.revision }}</small>
             </button>
           </div>
           <nb-card-body>
+            <nb-alert status="warning" *ngIf="conflictFor(selectedLanguage.id)" class="conflict-alert">
+              该语言在两台设备上都被修改，两个版本已<strong>并列待裁定</strong>。裁定前当前正文保持不变、不能编辑，也不能生成锁定版本。
+              <button nbButton size="tiny" status="warning" (click)="activeView = 'sync'">前往裁定</button>
+            </nb-alert>
             <div class="translation-status">
               <div><span>译者</span><strong>{{ selectedLanguage.translator }}</strong></div>
-              <div><span>语言代码</span><strong>{{ selectedLanguage.locale }}</strong></div>
-              <label><nb-checkbox [disabled]="isLocked" [checked]="selectedLanguage.reviewed" (checkedChange)="setLanguageReviewed($event)">语言复核完成</nb-checkbox></label>
+              <div><span>语言代码</span><strong>{{ selectedLanguage.locale }} · r{{ selectedLanguage.revision }}</strong></div>
+              <label><nb-checkbox [disabled]="isLocked || !!conflictFor(selectedLanguage.id)" [checked]="selectedLanguage.reviewed" (checkedChange)="setLanguageReviewed($event)">语言复核完成</nb-checkbox></label>
             </div>
-            <label class="field language-title"><span>翻译标题 *</span><input nbInput fullWidth [disabled]="isLocked" [ngModel]="selectedLanguage.title" (ngModelChange)="updateLanguage('title', $event)"></label>
+            <label class="field language-title"><span>翻译标题 *</span><input nbInput fullWidth [disabled]="isLanguageReadOnly(selectedLanguage.id)" [ngModel]="selectedLanguage.title" (ngModelChange)="updateLanguage('title', $event)"></label>
             <div class="body-heading"><span>正文 *</span><small>{{ currentSentences.length }} 句 · 点击句子可讨论</small></div>
-            <textarea class="document-editor" [disabled]="isLocked" [ngModel]="selectedLanguage.body" (ngModelChange)="updateLanguage('body', $event)"></textarea>
+            <textarea class="document-editor" [disabled]="isLanguageReadOnly(selectedLanguage.id)" [ngModel]="selectedLanguage.body" (ngModelChange)="updateLanguage('body', $event)"></textarea>
             <div class="sentence-strip" *ngIf="currentSentences.length">
               <button *ngFor="let sentence of currentSentences; let i = index" [class.selected]="i === selectedSentenceIndex" (click)="selectSentence(i)">
                 <span>{{ i + 1 }}</span>{{ sentence }}
@@ -157,8 +172,8 @@
 
     <section *ngIf="activeView === 'checks'" class="view-section">
       <div class="section-heading">
-        <div><span class="eyebrow">发布门禁</span><h2>逐项检查通知是否可发布</h2><p>错误项会阻止版本锁定；警告项需要人工确认并承担责任。</p></div>
-        <button nbButton status="danger" size="large" (click)="lockVersion()" [disabled]="isLocked">检查通过后锁定最终版本</button>
+        <div><span class="eyebrow">发布门禁</span><h2>逐项检查通知是否可发布</h2><p>错误项会阻止版本锁定；警告项需要人工确认并承担责任。裁定或复核变化后，检查结果立即重算。</p></div>
+        <button nbButton status="danger" size="large" (click)="lockVersion()" [disabled]="isLocked || hasPendingConflicts">检查通过后锁定最终版本</button>
       </div>
       <div class="check-layout">
         <div class="check-list">
@@ -241,10 +256,14 @@
       <div class="section-heading">
         <div><span class="eyebrow">版本控制</span><h2>冻结、比较与紧急修订</h2><p>最终锁定版本不可覆盖；紧急修订会从当前版本继续，并保留完整历史。</p></div>
         <div class="version-actions">
-          <button nbButton status="danger" (click)="lockVersion()" [disabled]="isLocked">锁定当前版本</button>
+          <button nbButton status="danger" (click)="lockVersion()" [disabled]="isLocked || hasPendingConflicts">锁定当前版本</button>
           <button nbButton status="warning" (click)="startEmergencyRevision()" [disabled]="!isLocked">发起紧急修订</button>
         </div>
       </div>
+      <nb-alert status="danger" class="top-alert" *ngIf="hasPendingConflicts">
+        有 {{ pendingConflicts.length }} 个语言版本并列待裁定；裁定前当前正文不变，也不能生成锁定版本。
+        <button nbButton size="tiny" status="danger" (click)="activeView = 'sync'">去裁定</button>
+      </nb-alert>
       <div class="version-layout">
         <aside>
           <nb-card class="panel">
@@ -252,7 +271,7 @@
             <nb-card-body class="timeline">
               <article *ngFor="let version of draft.versions; let last = last" [class.current]="last">
                 <span></span>
-                <div><b>{{ version.version }}</b><strong>{{ version.label }}</strong><p>{{ formatDateTime(version.createdAt) }} · {{ version.channels.length }} 个渠道</p><small *ngIf="version.emergency">紧急修订</small></div>
+                <div><b>{{ version.version }}</b><strong>{{ version.label }}</strong><p>{{ formatDateTime(version.createdAt) }} · {{ version.channels.length }} 个渠道 · 修订号 {{ version.revision }}</p><small *ngIf="version.emergency">紧急修订</small></div>
               </article>
             </nb-card-body>
           </nb-card>
@@ -289,6 +308,119 @@
             </nb-card-body>
           </nb-card>
         </div>
+      </div>
+    </section>
+
+    <section *ngIf="activeView === 'sync'" class="view-section">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">断网续作</span><h2>整包续作合并与并列裁定</h2>
+          <p>网络恢复后读入对端整包：不同语言直接并入，同一语言两边都改过则并列待裁定；裁定前正文不变、不能锁定。</p>
+        </div>
+      </div>
+
+      <div class="sync-grid">
+        <div class="main-column">
+          <nb-card class="panel conflict-panel" *ngIf="pendingConflicts.length">
+            <nb-card-header>
+              <div><span class="section-kicker">并列待裁定</span><h3>{{ pendingConflicts.length }} 个语言需要人工裁定</h3></div>
+              <span class="count-pill danger">{{ pendingConflicts.length }}</span>
+            </nb-card-header>
+            <nb-card-body class="conflict-body">
+              <article *ngFor="let conflict of pendingConflicts" class="conflict-card">
+                <header>
+                  <div><strong>{{ conflict.name }}</strong><span>{{ conflict.locale }} · 检测于 {{ formatDateTime(conflict.detectedAt) }}</span></div>
+                  <div class="conflict-sides">
+                    <button nbButton size="small" status="primary" (click)="adjudicate(conflict.id, 'local')">保留本机版本</button>
+                    <button nbButton size="small" status="warning" (click)="adjudicate(conflict.id, 'remote')">采用对端版本</button>
+                  </div>
+                </header>
+                <div class="conflict-columns">
+                  <div class="conflict-side local">
+                    <h4>本机版本 <small>r{{ conflict.local.revision }} · {{ conflict.localDeviceId.slice(-6) }}</small></h4>
+                    <h5>{{ conflict.local.title }}</h5>
+                    <p>{{ conflict.local.body }}</p>
+                  </div>
+                  <div class="conflict-side remote">
+                    <h4>对端版本 <small>r{{ conflict.remote.revision }} · {{ conflict.remoteDeviceId.slice(-6) }}</small></h4>
+                    <h5>{{ conflict.remote.title }}</h5>
+                    <p>{{ conflict.remote.body }}</p>
+                  </div>
+                </div>
+                <div class="conflict-diff">
+                  <div class="diff-legend"><span class="same">相同句</span><span class="changed">两边措辞不同</span><span class="added">对端新增</span><span class="removed">对端没有</span></div>
+                  <div class="diff-table">
+                    <div class="diff-head"><strong>本机正文</strong><strong>对端正文</strong></div>
+                    <div class="diff-row" *ngFor="let row of conflictRows(conflict)" [class]="row.kind">
+                      <p>{{ row.left || '—' }}</p><p>{{ row.right || '—' }}</p>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel" *ngIf="!pendingConflicts.length">
+            <nb-card-header><div><span class="section-kicker">裁定状态</span><h3>没有并列待裁定的语言</h3></div></nb-card-header>
+            <nb-card-body>
+              <p class="all-clear-text">所有并入的语言版本都有明确因果先后或已完成裁定，可以继续编辑、复核与锁定。</p>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel">
+            <nb-card-header><div><span class="section-kicker">整包导入</span><h3>读入对端续作整包</h3></div></nb-card-header>
+            <nb-card-body class="import-body">
+              <div class="import-actions">
+                <button nbButton status="primary" (click)="triggerPickFile()">选择整包文件 (.json)</button>
+                <span class="muted">也可以直接把整包内容粘贴到下方文本框。</span>
+              </div>
+              <textarea nbInput fullWidth rows="8" [(ngModel)]="importText" placeholder='粘贴形如 { "kind": "emergency-notice-sync-v1", ... } 的整包 JSON'></textarea>
+              <div class="import-footer">
+                <button nbButton status="success" [disabled]="!importText.trim()" (click)="applyImportPackage()">网络恢复 · 执行合并</button>
+                <span class="muted">重复回连同一整包不会多出语言版本或锁定版本。</span>
+              </div>
+            </nb-card-body>
+          </nb-card>
+        </div>
+
+        <aside class="side-column sync-side">
+          <nb-card class="panel compact">
+            <nb-card-header><div><span class="section-kicker">本机身份</span><h3>设备与修订</h3></div></nb-card-header>
+            <nb-card-body>
+              <div class="score-row"><span>设备 ID</span><b>…{{ deviceIdShort }}</b></div>
+              <div class="score-row"><span>草稿修订号</span><b>r{{ draftRevision }}</b></div>
+              <div class="score-row"><span>语言版本</span><b>{{ draft.languages.length }} 个</b></div>
+              <div class="score-row"><span>锁定版本</span><b>{{ draft.versions.length }} 个</b></div>
+              <label class="field editor-name"><span>操作者署名（写入修订记录）</span>
+                <input nbInput fullWidth [(ngModel)]="editorName">
+              </label>
+              <button nbButton fullWidth status="basic" (click)="exportPackageFile()">导出本机整包</button>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel compact" *ngIf="lastMergeReport">
+            <nb-card-header><div><span class="section-kicker">上次合并</span><h3>合并报告</h3></div></nb-card-header>
+            <nb-card-body class="report-list">
+              <div class="score-row"><span>对端设备</span><b>…{{ lastMergeReport.remoteDeviceId.slice(-6) }}</b></div>
+              <div class="score-row"><span>直接并入语言</span><b>{{ lastMergeReport.addedLanguages.length }} 个</b></div>
+              <div class="score-row"><span>新增锁定版本</span><b>{{ lastMergeReport.addedVersions }} 个</b></div>
+              <div class="score-row"><span>重复锁定版本跳过</span><b>{{ lastMergeReport.skippedDuplicateVersions }} 个</b></div>
+              <div class="score-row"><span>并列待裁定</span><b class="warning-text">{{ lastMergeReport.conflictLanguages.length }} 个</b></div>
+              <p class="muted" *ngIf="lastMergeReport.addedLanguages.length">并入：{{ lastMergeReport.addedLanguages.join('、') }}</p>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel compact">
+            <nb-card-header><div><span class="section-kicker">合并规则</span><h3>续作如何处理</h3></div></nb-card-header>
+            <nb-card-body class="rule-list">
+              <p><b>不同语言</b>：对端独有语言直接并入。</p>
+              <p><b>同一语言单边改</b>：按修订向量取较新，晚到整包不会覆盖另一端的新版本。</p>
+              <p><b>同一语言两边改</b>：并列待裁定；裁定前当前正文不变，禁止锁定。</p>
+              <p><b>裁定 / 复核变化</b>：发布检查与版本差异立即失效重算。</p>
+              <p><b>写入失败</b>：回滚本地存储，合并草稿保留在页面，可重试写入。</p>
+            </nb-card-body>
+          </nb-card>
+        </aside>
       </div>
     </section>
   </nb-layout-column>
